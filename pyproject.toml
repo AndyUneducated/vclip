@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vsplit"
+version = "0.1.0"
+description = "把 iPhone 4K/HDR 长视频切成适合微信分享的多个小视频（可自定义质量/大小）"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "anning" }]
+keywords = ["ffmpeg", "video", "split", "wechat", "hdr", "iphone"]
+dependencies = []
+
+[project.scripts]
+vsplit = "vsplit.cli:main"
+
+[tool.setuptools]
+packages = ["vsplit"]

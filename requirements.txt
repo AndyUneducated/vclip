@@ -1,0 +1,7 @@
+# vsplit 本身零 Python 第三方依赖（仅用标准库）。
+# 唯一的外部依赖是系统里的 ffmpeg / ffprobe：
+#   macOS:  brew install ffmpeg
+#
+# 提示：如果需要高质量的 HDR -> SDR 色调映射，请确认 ffmpeg
+# 编译时带有 zscale(libzimg) 或 libplacebo：
+#   ffmpeg -filters | grep -E 'zscale|libplacebo'

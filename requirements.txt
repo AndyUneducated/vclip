@@ -1,4 +1,4 @@
-# vsplit 本身零 Python 第三方依赖（仅用标准库）。
+# vclip 本身零 Python 第三方依赖（仅用标准库）。
 # 唯一的外部依赖是系统里的 ffmpeg / ffprobe：
 #   macOS:  brew install ffmpeg
 #

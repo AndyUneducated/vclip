@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from . import runner
 
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}  # PQ / HLG
 
@@ -15,12 +16,10 @@ class ProbeError(RuntimeError):
 
 
 def _require(tool: str) -> str:
-    path = shutil.which(tool)
-    if not path:
-        raise ProbeError(
-            f"找不到 `{tool}`，请先安装 ffmpeg：brew install ffmpeg"
-        )
-    return path
+    try:
+        return runner.tool_path(tool)
+    except runner.FFmpegNotFound as exc:
+        raise ProbeError(str(exc)) from exc
 
 
 def _fraction(value: str | None) -> float:
@@ -53,10 +52,14 @@ class VideoInfo:
     color_transfer: str
     color_primaries: str
     color_space: str
+    color_range: str
+    sar: str                 # 像素宽高比 sample_aspect_ratio，如 "1:1"
     fps: float
     stream_bitrate: int      # 视频流码率 (bps)，可能为 0
     has_audio: bool
     audio_codec: str | None
+    audio_sample_rate: int   # 音频采样率 (Hz)，无音频为 0
+    audio_channels: int      # 音频声道数，无音频为 0
 
     @property
     def is_hdr(self) -> bool:
@@ -77,6 +80,25 @@ class VideoInfo:
             return int(self.size_bytes * 8 / self.duration)
         return self.stream_bitrate
 
+    def as_dict(self) -> dict:
+        """结构化输出（供 `info --json` / 脚本集成）。"""
+        d = asdict(self)
+        d["path"] = str(self.path)
+        d["is_hdr"] = self.is_hdr
+        d["is_10bit"] = self.is_10bit
+        d["overall_bitrate_bps"] = self.overall_bitrate_bps
+        return d
+
+    def _audio_human(self) -> str:
+        if not self.has_audio:
+            return "无"
+        parts = [self.audio_codec or "?"]
+        if self.audio_sample_rate:
+            parts.append(f"{self.audio_sample_rate} Hz")
+        if self.audio_channels:
+            parts.append(f"{self.audio_channels}ch")
+        return " ".join(parts)
+
     def human(self) -> str:
         hdr = "HDR" if self.is_hdr else "SDR"
         depth = "10bit" if self.is_10bit else "8bit"
@@ -87,7 +109,8 @@ class VideoInfo:
             f"  视频编码  : {self.codec} ({self.pix_fmt}, {depth})\n"
             f"  动态范围  : {hdr}"
             f" (trc={self.color_transfer or '?'}, prim={self.color_primaries or '?'})\n"
-            f"  音频      : {self.audio_codec or '无'}\n"
+            f"  像素宽高比: {self.sar or '?'}\n"
+            f"  音频      : {self._audio_human()}\n"
             f"  文件大小  : {format_size(self.size_bytes)}\n"
             f"  整体码率  : {self.overall_bitrate_bps / 1_000_000:.1f} Mbps"
         )
@@ -125,6 +148,10 @@ def probe(path: str | Path) -> VideoInfo:
     size_bytes = int(fmt.get("size") or (p.stat().st_size))
     fps = _fraction(v.get("avg_frame_rate")) or _fraction(v.get("r_frame_rate"))
 
+    sar = v.get("sample_aspect_ratio", "") or ""
+    if sar in ("0:1", "0:0"):  # ffprobe 对未知 SAR 的表示，视为未标注
+        sar = ""
+
     return VideoInfo(
         path=p,
         duration=duration,
@@ -136,10 +163,14 @@ def probe(path: str | Path) -> VideoInfo:
         color_transfer=v.get("color_transfer", ""),
         color_primaries=v.get("color_primaries", ""),
         color_space=v.get("color_space", ""),
+        color_range=v.get("color_range", ""),
+        sar=sar,
         fps=fps,
         stream_bitrate=int(_fraction(v.get("bit_rate")) or 0),
         has_audio=a is not None,
         audio_codec=a.get("codec_name") if a else None,
+        audio_sample_rate=int(_fraction(a.get("sample_rate")) if a else 0),
+        audio_channels=int(a.get("channels") or 0) if a else 0,
     )
 
 

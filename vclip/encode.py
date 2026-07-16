@@ -1,10 +1,13 @@
 """根据 EncodeOptions + 视频信息 + 本机能力，构建 ffmpeg 的编码/滤镜参数。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .capabilities import Capabilities
 from .probe import VideoInfo
+
+# 按大小切分时，为吸收码率波动预留的余量（实际体积略小于目标）。
+SIZE_SAFETY = 0.95
 
 # 各分辨率下的默认目标码率 (kbps)，仅在“质量模式”未显式指定码率时用作参考。
 _DEFAULT_BITRATE = {
@@ -149,11 +152,6 @@ def _resolve_encoder(
     if not force_software:
         if opts.encoder == "hardware":
             use_hw = True
-            if hdr_mode == "keep":
-                warnings.append(
-                    "硬件(videotoolbox)编码常常不写入 HDR 的 transfer/primaries 标签，"
-                    "输出可能不被识别为 HDR。保留 HDR 建议用 --encoder software。"
-                )
         elif opts.encoder == "auto":
             if hdr_mode == "keep":
                 # 保留 HDR 时软件 x265 能可靠写入 HDR10 元数据，硬件会丢标签
@@ -167,10 +165,14 @@ def _resolve_encoder(
                 use_hw = opts.crf is None
 
     if use_hw:
-        if codec == "hevc" and caps.vt_hevc:
-            return "hevc_videotoolbox", True, warnings
-        if codec == "h264" and caps.vt_h264:
-            return "h264_videotoolbox", True, warnings
+        hw = caps.hw_encoder(codec)
+        if hw:
+            if hdr_mode == "keep":
+                warnings.append(
+                    f"硬件编码器 {hw} 常常不写入 HDR 的 transfer/primaries 标签，"
+                    "输出可能不被识别为 HDR。保留 HDR 建议用 --encoder software。"
+                )
+            return hw, True, warnings
         warnings.append("未找到对应的硬件编码器，回退到软件编码。")
 
     if codec == "hevc":
@@ -197,10 +199,10 @@ def build_plan(
     # H.264 无法承载 HDR10，保留 HDR 必须用 HEVC。
     if hdr_mode == "keep" and opts.codec != "hevc":
         warnings.append("HDR 保留模式需要 HEVC，已自动把编码切换为 hevc。")
-        opts = EncodeOptions(**{**opts.__dict__, "codec": "hevc"})
+        opts = replace(opts, codec="hevc")
 
     if force_bitrate and opts.crf is not None:
-        opts = EncodeOptions(**{**opts.__dict__, "crf": None})
+        opts = replace(opts, crf=None)
 
     encoder_name, is_hw, w2 = _resolve_encoder(opts, caps, hdr_mode)
     warnings += w2

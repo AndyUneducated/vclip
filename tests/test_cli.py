@@ -32,6 +32,12 @@ def test_info_json_flag():
     assert a.json is True
 
 
+def test_caps_subcommand_parses():
+    a = build_parser().parse_args(["caps", "--json"])
+    assert a.command == "caps"
+    assert a.json is True
+
+
 def test_verify_subcommand_parses():
     a = build_parser().parse_args(["verify", "whole.mp4", "p1.mp4", "p2.mp4"])
     assert a.command == "verify"

@@ -236,7 +236,6 @@ def build_plan(
         video_args += [
             "-b:v", f"{video_bitrate_kbps}k",
             "-maxrate", f"{int(video_bitrate_kbps * 1.5)}k",
-            "-tag:v", "hvc1" if opts.codec == "hevc" else "avc1",
         ]
     else:
         video_args += ["-preset", opts.x26x_preset]
@@ -254,6 +253,10 @@ def build_plan(
                 "-maxrate", f"{video_bitrate_kbps}k",
                 "-bufsize", f"{video_bitrate_kbps * 2}k",
             ]
+
+    # mp4 里的 codec tag：HEVC 必须写 hvc1，否则 QuickTime/Apple 设备拒绝播放
+    # （libx265 默认写 hev1）。H.264 默认即 avc1，这里一并显式化，软硬件行为统一。
+    video_args += ["-tag:v", "hvc1" if opts.codec == "hevc" else "avc1"]
 
     # ---- 色彩元数据 ----
     if hdr_mode == "keep":

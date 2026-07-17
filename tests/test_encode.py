@@ -100,3 +100,28 @@ def test_audio_copy_and_no_audio():
     plan2 = build_plan(make_sdr_info(has_audio=False),
                        make_opts(encoder="software"), make_caps())
     assert plan2.audio_args == ["-an"]
+
+
+def test_software_hevc_tags_hvc1():
+    # 软件 HEVC 也必须写 hvc1，否则 QuickTime/Apple 拒绝播放（libx265 默认 hev1）
+    plan = build_plan(make_sdr_info(),
+                      make_opts(codec="hevc", encoder="software"), make_caps())
+    assert plan.encoder_name == "libx265"
+    i = plan.video_args.index("-tag:v")
+    assert plan.video_args[i + 1] == "hvc1"
+
+
+def test_hardware_hevc_tags_hvc1():
+    caps = make_caps(vt_hevc=True)
+    plan = build_plan(make_sdr_info(),
+                      make_opts(codec="hevc", encoder="hardware"), caps)
+    assert plan.encoder_name == "hevc_videotoolbox"
+    i = plan.video_args.index("-tag:v")
+    assert plan.video_args[i + 1] == "hvc1"
+
+
+def test_h264_tags_avc1():
+    plan = build_plan(make_sdr_info(),
+                      make_opts(codec="h264", encoder="software"), make_caps())
+    i = plan.video_args.index("-tag:v")
+    assert plan.video_args[i + 1] == "avc1"

@@ -8,10 +8,12 @@
   probe        —— ffprobe 探测视频信息 (VideoInfo)
   capabilities —— 检测本机 ffmpeg 支持的编码器/滤镜（含跨平台硬件编码）
   encode       —— 根据 EncodeOptions 构建 ffmpeg 编码参数
+  inputs       —— 片段输入解析（目录/多文件 → 有序片段列表）
+  pipeline     —— 执行管线契约：Plan（可执行任务）与 Reporter（进度上报）
   split        —— 按大小 / 按时长切分、裁剪子片段的核心逻辑
   merge        —— 无损重组（-c copy 拼接）
   verify       —— 逐帧像素级无损校验（合并 / 切分通用）
   cli          —— 命令行入口
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

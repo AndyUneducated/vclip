@@ -10,10 +10,23 @@ import functools
 import os
 import shutil
 import subprocess
+from pathlib import Path
+
+# `-movflags +faststart` 只对 mp4/mov 系容器有意义（把 moov 前置便于边下边播）。
+_FASTSTART_EXTS = {".mp4", ".mov", ".m4v", ".m4a"}
 
 
 class FFmpegNotFound(RuntimeError):
     """找不到 ffmpeg / ffprobe 可执行文件。"""
+
+
+def faststart_args(output: str | Path) -> list[str]:
+    """按输出容器决定是否加 `-movflags +faststart`。
+
+    该 flag 是 mp4/mov 复用器私有选项；用在 mkv/webm/ts 等容器上虽被 ffmpeg
+    静默忽略（不报错），但传一个用不上的参数并不干净。这里按扩展名精确判断。
+    """
+    return ["-movflags", "+faststart"] if Path(output).suffix.lower() in _FASTSTART_EXTS else []
 
 
 @functools.lru_cache(maxsize=None)

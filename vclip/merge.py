@@ -6,24 +6,14 @@
 from __future__ import annotations
 
 import re
-import shlex
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import runner
+from .inputs import resolve_inputs
+from .pipeline import NullReporter, Reporter
 from .probe import VideoInfo, format_duration, format_size, probe
-
-# 可识别为视频片段的扩展名（用于传入目录时自动收集）。
-VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".ts", ".m2ts"}
-
-
-def _natural_key(path: Path) -> list:
-    """自然排序键：让 part2 排在 part10 之前（而非字典序）。"""
-    return [
-        int(tok) if tok.isdigit() else tok.lower()
-        for tok in re.split(r"(\d+)", path.name)
-    ]
 
 
 def _fatal_attrs(info: VideoInfo) -> dict[str, object]:
@@ -92,11 +82,14 @@ class MergePlan:
             # -map 0 保留全部流（多音轨/字幕），无损重组应原样拼接。
             "-map", "0",
             "-c", "copy",
-            "-movflags", "+faststart",
+            *runner.faststart_args(self.output),
             str(self.output),
         ]
 
-    def execute(self, *, dry_run: bool = False) -> list[Path]:
+    def execute(
+        self, *, dry_run: bool = False, reporter: Reporter | None = None
+    ) -> list[Path]:
+        reporter = reporter or NullReporter()
         self.output.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
             "w", suffix=".txt", delete=False,
@@ -106,7 +99,7 @@ class MergePlan:
             fh.write("\n".join(self._concat_line(i.path) for i in self.inputs) + "\n")
 
         cmd = self._command(list_file)
-        print("$ " + " ".join(shlex.quote(c) for c in cmd))
+        reporter.command(cmd)
         try:
             if dry_run:
                 return []
@@ -117,37 +110,6 @@ class MergePlan:
             list_file.unlink(missing_ok=True)
 
         return [self.output] if self.output.exists() else []
-
-
-def _resolve_inputs(inputs: list[str]) -> list[Path]:
-    """把命令行参数解析成有序的片段文件列表。
-
-    - 传入单个目录：自动收集其中的视频文件并按文件名排序。
-    - 传入多个文件：保持给定顺序（顺序即拼接顺序）。
-    """
-    if len(inputs) == 1 and Path(inputs[0]).is_dir():
-        d = Path(inputs[0])
-        files = sorted(
-            (
-                p for p in d.iterdir()
-                if p.is_file()
-                and p.suffix.lower() in VIDEO_EXTS
-                # 排除本工具自己产出的重组文件，避免二次 merge 把结果又拼进去。
-                and not p.stem.endswith("_merged")
-            ),
-            key=_natural_key,
-        )
-        if not files:
-            raise ValueError(f"目录 {d} 里没有可识别的视频片段")
-        return files
-
-    files = [Path(x) for x in inputs]
-    for p in files:
-        if not p.exists():
-            raise ValueError(f"文件不存在：{p}")
-        if not p.is_file():
-            raise ValueError(f"不是文件：{p}")
-    return files
 
 
 def _default_output(first: Path) -> Path:
@@ -208,7 +170,7 @@ def plan_merge(
     inputs: list[str],
     output: str | Path | None = None,
 ) -> MergePlan:
-    files = _resolve_inputs(inputs)
+    files = resolve_inputs(inputs)
     if len(files) < 2:
         raise ValueError("至少需要 2 个片段才能重组")
 

@@ -26,3 +26,13 @@ def test_missing_tool_raises(monkeypatch):
     with pytest.raises(runner.FFmpegNotFound):
         runner.tool_path("ffmpeg")
     runner.tool_path.cache_clear()
+
+
+def test_faststart_args_only_for_mp4_family():
+    assert runner.faststart_args("out.mp4") == ["-movflags", "+faststart"]
+    assert runner.faststart_args("out.mov") == ["-movflags", "+faststart"]
+    assert runner.faststart_args("out.M4V") == ["-movflags", "+faststart"]
+    # 非 mp4 系容器不应带该 flag
+    assert runner.faststart_args("out.mkv") == []
+    assert runner.faststart_args("out.webm") == []
+    assert runner.faststart_args("out.ts") == []

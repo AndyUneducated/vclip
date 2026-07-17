@@ -8,14 +8,20 @@
 from __future__ import annotations
 
 import math
-import shlex
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import runner
 from .capabilities import Capabilities
-from .encode import SIZE_SAFETY, EncodeOptions, EncodePlan, build_plan
+from .encode import (
+    SIZE_SAFETY,
+    EncodeOptions,
+    EncodePlan,
+    build_plan,
+    parse_resolution,
+)
+from .pipeline import NullReporter, Reporter
 from .probe import VideoInfo, format_duration, format_size
 
 
@@ -48,13 +54,21 @@ class SplitPlan:
     jobs: int = 1                    # 转码多段时的并行度
 
     def describe(self) -> str:
-        lines = [
-            f"  切分模式  : {self.mode}",
-            f"  每段时长  : {format_duration(self.segment_seconds)}",
-            f"  预计段数  : {self.estimated_parts} 段",
-            f"  单段大小  : ~{format_size(self.estimated_part_size)}",
-            f"  输出目录  : {self.output_dir}",
-        ]
+        if self.mode == "shrink":
+            lines = [
+                "  操作      : 整片压缩为单个文件",
+                f"  时长      : {format_duration(self.segment_seconds)}",
+                f"  预计大小  : ~{format_size(self.estimated_part_size)}",
+                f"  输出文件  : {self.output_files[0] if self.output_files else self.output_dir}",
+            ]
+        else:
+            lines = [
+                f"  切分模式  : {self.mode}",
+                f"  每段时长  : {format_duration(self.segment_seconds)}",
+                f"  预计段数  : {self.estimated_parts} 段",
+                f"  单段大小  : ~{format_size(self.estimated_part_size)}",
+                f"  输出目录  : {self.output_dir}",
+            ]
         if self.encode_plan:
             lines.append(f"  编码器    : {self.encode_plan.encoder_name}")
             lines.append(f"  HDR 处理  : {self.encode_plan.hdr_mode}")
@@ -64,25 +78,17 @@ class SplitPlan:
                 lines.append(f"  滤镜      : {self.encode_plan.vf}")
         return "\n".join(lines)
 
-    def _print_commands(self) -> None:
-        multi = len(self.commands) > 1
+    def _run_serial(self, reporter: Reporter) -> None:
+        total = len(self.commands)
         for i, cmd in enumerate(self.commands, 1):
-            prefix = f"[{i}/{len(self.commands)}] " if multi else ""
-            print(f"\n{prefix}$ " + " ".join(shlex.quote(c) for c in cmd))
-        print()
-
-    def _run_serial(self) -> None:
-        multi = len(self.commands) > 1
-        for i, cmd in enumerate(self.commands, 1):
-            if multi:
-                print(f"\n── 第 {i}/{len(self.commands)} 段 ──")
+            reporter.segment_start(i, total)
             proc = runner.run(cmd)
             if proc.returncode != 0:
                 raise RuntimeError(f"ffmpeg 执行失败 (exit={proc.returncode})")
 
-    def _run_parallel(self, jobs: int) -> None:
+    def _run_parallel(self, jobs: int, reporter: Reporter) -> None:
         total = len(self.commands)
-        print(f"并行编码：{jobs} 段同时进行，共 {total} 段 …")
+        reporter.note(f"并行编码：{jobs} 段同时进行，共 {total} 段 …")
 
         def _one(idx_cmd):
             idx, cmd = idx_cmd
@@ -95,20 +101,24 @@ class SplitPlan:
                     raise RuntimeError(
                         f"第 {idx}/{total} 段 ffmpeg 执行失败 (exit={rc})\n{err.strip()}"
                     )
-                print(f"  ✓ 第 {idx}/{total} 段完成")
+                reporter.segment_done(idx, total)
 
-    def execute(self, *, dry_run: bool = False) -> list[Path]:
-        """执行切分。返回生成的文件列表。"""
-        self._print_commands()
+    def execute(
+        self, *, dry_run: bool = False, reporter: Reporter | None = None
+    ) -> list[Path]:
+        """执行切分。返回生成的文件列表；进度通过 reporter 上报。"""
+        reporter = reporter or NullReporter()
+        total = len(self.commands)
+        for i, cmd in enumerate(self.commands, 1):
+            reporter.command(cmd, i, total)
         if dry_run:
             return []
 
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        use_parallel = self.jobs > 1 and len(self.commands) > 1
-        if use_parallel:
-            self._run_parallel(self.jobs)
+        if self.jobs > 1 and total > 1:
+            self._run_parallel(self.jobs, reporter)
         else:
-            self._run_serial()
+            self._run_serial(reporter)
 
         if self.output_files is not None:
             return [f for f in self.output_files if f.exists()]
@@ -127,6 +137,15 @@ def _part_path(info: VideoInfo, out_dir: Path, idx: int, ext: str) -> Path:
 
 def _pattern(info: VideoInfo, out_dir: Path, ext: str) -> Path:
     return out_dir / f"{info.path.stem}_part%03d{ext}"
+
+
+def _copy_ext(info: VideoInfo) -> str:
+    """无损切分的分段容器：保留源容器扩展名。
+
+    强行统一成 .mp4 会在源为 mkv/webm/ts 等时出错（`-map 0` 会把字幕/数据流
+    一并复制，而这些流未必兼容 mp4）。保留原容器最安全，也最贴合"无损"。
+    """
+    return info.path.suffix or ".mp4"
 
 
 def _copy_cmd(info: VideoInfo, seconds: float, pattern: Path) -> list[str]:
@@ -154,7 +173,7 @@ def _encode_seg_cmd(
     if plan.vf:
         cmd += ["-vf", plan.vf]
     cmd += plan.video_args + plan.audio_args
-    cmd += ["-movflags", "+faststart", str(outfile)]
+    cmd += [*runner.faststart_args(outfile), str(outfile)]
     return cmd
 
 
@@ -191,7 +210,8 @@ def plan_duration(
     est_parts = max(1, math.ceil(info.duration / seconds))
 
     if not transcode:
-        pattern = _pattern(info, out_dir, ".mp4")
+        ext = _copy_ext(info)
+        pattern = _pattern(info, out_dir, ext)
         est_size = int(info.overall_bitrate_bps * seconds / 8)
         return SplitPlan(
             mode="duration-copy",
@@ -201,7 +221,7 @@ def plan_duration(
             commands=[_copy_cmd(info, seconds, pattern)],
             output_dir=out_dir,
             output_files=None,
-            output_glob=f"{info.path.stem}_part*.mp4",
+            output_glob=f"{info.path.stem}_part*{ext}",
             encode_plan=None,
             warnings=_copy_split_warnings(
                 info, "无损切分：切点只能落在关键帧上，单段实际时长会略有出入。"
@@ -248,7 +268,8 @@ def plan_size(
         if bps <= 0:
             raise ValueError("无法估算源码率，无法按大小无损切分")
         seconds = target_bytes * 8 / bps * safety
-        pattern = _pattern(info, out_dir, ".mp4")
+        ext = _copy_ext(info)
+        pattern = _pattern(info, out_dir, ext)
         est_parts = max(1, math.ceil(info.duration / seconds))
         est_size = int(bps * seconds / 8)
         return SplitPlan(
@@ -259,7 +280,7 @@ def plan_size(
             commands=[_copy_cmd(info, seconds, pattern)],
             output_dir=out_dir,
             output_files=None,
-            output_glob=f"{info.path.stem}_part*.mp4",
+            output_glob=f"{info.path.stem}_part*{ext}",
             encode_plan=None,
             warnings=_copy_split_warnings(
                 info, "无损按大小切分：切点受关键帧限制，单段大小会有波动（已留余量）。"
@@ -328,7 +349,7 @@ def plan_trim(
         ]
         if end is not None:
             cmd += ["-t", f"{dur:.3f}"]
-        cmd += ["-map", "0", "-c", "copy", "-movflags", "+faststart", str(out)]
+        cmd += ["-map", "0", "-c", "copy", *runner.faststart_args(out), str(out)]
         est_size = int(info.overall_bitrate_bps * dur / 8)
         return SplitPlan(
             mode="trim-copy",
@@ -353,6 +374,84 @@ def plan_trim(
     return SplitPlan(
         mode="trim-encode",
         segment_seconds=dur,
+        estimated_parts=1,
+        estimated_part_size=est_size,
+        commands=[cmd],
+        output_dir=out.parent,
+        output_files=[out],
+        output_glob=out.name,
+        encode_plan=plan,
+        warnings=plan.warnings,
+    )
+
+
+def _encode_full_cmd(info: VideoInfo, plan: EncodePlan, outfile: Path) -> list[str]:
+    """整片转码为单个文件（不切分）。"""
+    cmd = [
+        runner.ffmpeg(), "-y", "-hide_banner", "-i", str(info.path),
+        "-map", "0:v:0", "-map", "0:a?",
+    ]
+    if plan.vf:
+        cmd += ["-vf", plan.vf]
+    cmd += plan.video_args + plan.audio_args
+    cmd += [*runner.faststart_args(outfile), str(outfile)]
+    return cmd
+
+
+def _shrink_label(info: VideoInfo, opts: EncodeOptions) -> str:
+    """输出文件名后缀标签：用**实际生效**高度（只缩小不放大），否则 small。"""
+    _, th = parse_resolution(opts.resolution)
+    if not th:
+        return "small"
+    eff = th if (not info.height or th < info.height) else info.height
+    return f"{eff}p"
+
+
+def _shrink_out_path(info: VideoInfo, outdir: str | Path | None, label: str) -> Path:
+    if outdir:
+        p = Path(outdir)
+        if p.suffix:  # 明确的输出文件
+            return p
+        return p / f"{info.path.stem}_{label}.mp4"
+    return info.path.parent / f"{info.path.stem}_{label}.mp4"
+
+
+def plan_shrink(
+    info: VideoInfo,
+    caps: Capabilities,
+    opts: EncodeOptions,
+    *,
+    target_mb: float | None = None,
+    outdir: str | Path | None = None,
+) -> SplitPlan:
+    """把整段视频转码压缩为**单个**较小的文件（默认降到 720p，适合社交分享）。
+
+    给了 target_mb 时按时长反推目标码率，尽量贴近目标大小；否则用质量模式
+    （默认码率 / 或用户的 --crf / --bitrate）。
+    """
+    force_bitrate = False
+    if target_mb is not None:
+        if target_mb <= 0:
+            raise ValueError("目标大小必须大于 0")
+        if info.duration <= 0:
+            raise ValueError("无法获取时长，无法按大小压缩")
+        total_kbps = int(target_mb * 1024 * 1024 * 8 / info.duration / 1000 * SIZE_SAFETY)
+        audio_kbps = (
+            0 if opts.audio_copy or not info.has_audio else opts.audio_bitrate_kbps
+        )
+        video_kbps = max(100, total_kbps - audio_kbps)
+        opts = replace(opts, bitrate_kbps=video_kbps, crf=None)
+        force_bitrate = True
+
+    plan = build_plan(info, opts, caps, force_bitrate=force_bitrate)
+    label = _shrink_label(info, opts)
+    out = _shrink_out_path(info, outdir, label)
+    cmd = _encode_full_cmd(info, plan, out)
+    total_kbps = plan.total_bitrate_kbps or info.overall_bitrate_bps // 1000
+    est_size = int(total_kbps * 1000 * info.duration / 8) if info.duration else 0
+    return SplitPlan(
+        mode="shrink",
+        segment_seconds=info.duration,
         estimated_parts=1,
         estimated_part_size=est_size,
         commands=[cmd],

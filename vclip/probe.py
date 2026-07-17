@@ -129,9 +129,7 @@ def probe(path: str | Path) -> VideoInfo:
         str(p),
     ]
     try:
-        out = subprocess.run(
-            cmd, check=True, capture_output=True, text=True
-        ).stdout
+        out = runner.run(cmd, capture=True, check=True).stdout
     except subprocess.CalledProcessError as exc:  # pragma: no cover
         raise ProbeError(f"ffprobe 读取失败：{exc.stderr.strip()}") from exc
 

@@ -6,19 +6,8 @@ from vclip.merge import (
     _check_compatible,
     _default_output,
     _fatal_attrs,
-    _natural_key,
-    _resolve_inputs,
 )
-from conftest import make_info, make_sdr_info
-
-
-def test_natural_key_orders_numerically():
-    names = ["clip_part10.mp4", "clip_part2.mp4", "clip_part1.mp4"]
-    paths = [Path(n) for n in names]
-    ordered = sorted(paths, key=_natural_key)
-    assert [p.name for p in ordered] == [
-        "clip_part1.mp4", "clip_part2.mp4", "clip_part10.mp4"
-    ]
+from conftest import make_sdr_info
 
 
 def test_default_output_strips_part_suffix():
@@ -80,34 +69,3 @@ def test_check_compatible_color_mismatch_warns_not_raises():
         make_sdr_info(color_primaries="bt2020"),
     ])
     assert warns and any("色彩" in w for w in warns)
-
-
-def _touch(p: Path):
-    p.write_bytes(b"x")
-
-
-def test_resolve_inputs_dir_natural_sort_and_excludes_merged(tmp_path):
-    for name in ["m_part1.mp4", "m_part2.mp4", "m_part10.mp4", "m_merged.mp4"]:
-        _touch(tmp_path / name)
-    files = _resolve_inputs([str(tmp_path)])
-    names = [f.name for f in files]
-    assert names == ["m_part1.mp4", "m_part2.mp4", "m_part10.mp4"]
-    assert "m_merged.mp4" not in names
-
-
-def test_resolve_inputs_empty_dir_raises(tmp_path):
-    with pytest.raises(ValueError):
-        _resolve_inputs([str(tmp_path)])
-
-
-def test_resolve_inputs_missing_file_raises(tmp_path):
-    with pytest.raises(ValueError):
-        _resolve_inputs([str(tmp_path / "nope.mp4")])
-
-
-def test_resolve_inputs_keeps_explicit_order(tmp_path):
-    a, b = tmp_path / "b.mp4", tmp_path / "a.mp4"
-    _touch(a)
-    _touch(b)
-    files = _resolve_inputs([str(a), str(b)])
-    assert [f.name for f in files] == ["b.mp4", "a.mp4"]
